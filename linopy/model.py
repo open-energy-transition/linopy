@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from tempfile import NamedTemporaryFile, gettempdir
@@ -948,6 +949,7 @@ class Model:
         basis_fn: str | Path | None = None,
         warmstart_fn: str | Path | None = None,
         keep_files: bool = False,
+        only_generate_problem_file: bool = False,
         env: None = None,
         sanitize_zeros: bool = True,
         remote: None = None,
@@ -1073,6 +1075,13 @@ class Model:
             raise ValueError(
                 f"Solver {solver_name} does not support quadratic problems."
             )
+
+        if only_generate_problem_file:
+            nc_fn = problem_fn.with_suffix(".nc")
+            self.to_netcdf(nc_fn)
+            logger.info(f"Solver problem file written as NetCDF to `{nc_fn}`.")
+            logger.info("Exiting here because only_generate_problem_file is True.")
+            sys.exit(0)
 
         try:
             func = getattr(solvers, f"run_{solver_name}")
