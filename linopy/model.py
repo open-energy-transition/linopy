@@ -1079,10 +1079,7 @@ class Model:
         if only_generate_problem_file:
             if isinstance(only_generate_problem_file, str):
                 problem_fn = Path(only_generate_problem_file)
-                self.to_file(problem_fn)
-            else:
-                nc_fn = problem_fn.with_suffix(".nc")
-                self.to_netcdf(nc_fn)
+            self.to_file(problem_fn)
             logger.info(f"Solver problem file written to `{problem_fn}`.")
             logger.info("Exiting here because only_generate_problem_file is True.")
             sys.exit(0)
