@@ -1082,14 +1082,12 @@ class Model:
             if isinstance(only_generate_problem_file, str):
                 problem_fn = Path(only_generate_problem_file)
 
-                # Check if the file extension is supported
-                if problem_fn.suffix not in [".lp", ".nc"]:
-                    raise ValueError(f"Unsupported file type: {problem_fn.suffix}")
-
                 if problem_fn.suffix == ".lp":
                     self.to_file(problem_fn)
-                else:
+                elif problem_fn.suffix == ".nc":
                     self.to_netcdf(problem_fn)
+                else:
+                    raise ValueError(f"Unsupported file type: {problem_fn.suffix}")
                 logger.info(f"Solver problem file written to `{problem_fn}`.")
 
             else:
