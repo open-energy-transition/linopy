@@ -949,7 +949,7 @@ class Model:
         basis_fn: str | Path | None = None,
         warmstart_fn: str | Path | None = None,
         keep_files: bool = False,
-        only_generate_problem_file: bool = False,
+        only_generate_problem_file: str | bool = False,
         env: None = None,
         sanitize_zeros: bool = True,
         remote: None = None,
@@ -1065,6 +1065,8 @@ class Model:
 
         if problem_fn is None:
             problem_fn = self.get_problem_file(io_api=io_api)
+        if isinstance(problem_fn, str):
+            problem_fn = Path(problem_fn)
         if solution_fn is None:
             solution_fn = self.get_solution_file()
 
@@ -1079,11 +1081,22 @@ class Model:
         if only_generate_problem_file:
             if isinstance(only_generate_problem_file, str):
                 problem_fn = Path(only_generate_problem_file)
-                self.to_file(problem_fn)
+
+                if problem_fn.suffix == ".lp":
+                    self.to_file(problem_fn)
+                elif problem_fn.suffix == ".nc":
+                    self.to_netcdf(problem_fn)
+                else:
+                    raise ValueError(f"Unsupported file type: {problem_fn.suffix}")
+                logger.info(f"Solver problem file written to `{problem_fn}`.")
+
             else:
+                # Default case: Create a .nc file
                 nc_fn = problem_fn.with_suffix(".nc")
                 self.to_netcdf(nc_fn)
-            logger.info(f"Solver problem file written to `{problem_fn}`.")
+                logger.info(f"Solver problem file written as NetCDF to `{nc_fn}`.")
+
+            # Log and exit after file generation
             logger.info("Exiting here because only_generate_problem_file is True.")
             sys.exit(0)
 
