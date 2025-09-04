@@ -36,6 +36,8 @@ dependencies = [
     "polars",
     "tqdm",
     "deprecation",
+    "google-cloud-storage",
+    "requests"
 ]
 
 [project.urls]
@@ -63,6 +65,7 @@ dev = [
     "netcdf4",
     "paramiko",
     "types-paramiko",
+    "types-requests",
     "gurobipy",
     "highspy",
 ]
@@ -87,6 +90,10 @@ include = ["linopy"]
 [tool.setuptools_scm]
 write_to = "linopy/version.py"
 version_scheme = "no-guess-dev"
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+norecursedirs = ["dev-scripts", "doc", "examples", "benchmark"]
 
 [tool.coverage.run]
 branch = true
