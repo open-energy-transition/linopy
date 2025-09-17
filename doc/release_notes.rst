@@ -4,6 +4,150 @@ Release Notes
 Upcoming Version
 ----------------
 
+* Replace pandas-based LP file writing with polars implementation for significantly improved performance on large models
+* Consolidate "lp" and "lp-polars" io_api options - both now use the optimized polars backend
+* Reduced memory usage and faster file I/O operations when exporting models to LP format
+* Improved constraint equality check in `linopy.testing.assert_conequal` to less strict optionally
+* Minor bugfix for multiplying variables with numpy type constants
+
+Version 0.5.6
+--------------
+
+* Improved variable/expression arithmetic methods so that they correctly handle types
+* Gurobi: Pass dictionary as env argument `env={...}` through to gurobi env creation
+* Added integration with OETC platform
+* Mosek: Remove explicit use of Env, use global env instead
+* Objectives can now be created from variables via `linopy.Model.add_objective`.
+
+**Breaking Changes**
+
+* With this release, the package support for Python 3.9 was dropped and support for Python 3.10 was officially added.
+* The selection of a single item in `__getitem__` now returns a `Variable` instead of a `ScalarVariable`.
+
+
+Version 0.5.5
+--------------
+
+* Internally assign new data fields to expressions with a multiindexed-safe routine.
+
+Version 0.5.4
+--------------
+
+
+**Bug Fixes**
+
+* Remove default highs log file when `log_fn=None` and `io_api="direct"`. This caused `log_file` in
+`solver_options` to be ignored.
+* Fix the parsing of solutions returned by the CBC solver when setting a MIP duality
+  gap tolerance.
+* Improve the mapping of termination conditions for the SCIP solver
+* Treat GLPK's `integer undefined` status as not-OK
+* Internally assign new data fields to `Variable` and `Constraint` with a multiindexed-safe routine. Before the
+  assignment when using multi-indexed coordinates, an deprecation warning was raised. This is fixed now.
+
+
+Version 0.5.3
+--------------
+
+**Bug Fixes**
+
+* Fix the parsing of solutions returned by the CBC solver when solving from a file to not
+  assume that variables start with `x`.
+* Fix the retrieval of solutions from the SCIP solver, and do not turn off presolve.
+
+**Minor Improvements**
+
+* Support pickling models.
+
+Version 0.5.2
+--------------
+
+**Bug Fixes**
+
+* Fix the multiplication with of zero dimensional numpy arrays with linopy objects.
+This is mainly affecting operations where single numerical items from  pandas objects
+are selected and used for multiplication.
+
+Version 0.5.1
+--------------
+
+**Deprecations**
+
+* Renamed `expression.empty()` to `expression.empty` to align with the use of empty in
+  pandas. A custom wrapper ensures that `expression.empty()` continues to work, but emits
+  a DeprecationWarning.
+
+**Features**
+
+** Features **
+
+* Added support for arithmetic operations with custom classes.
+* Added `align` function as a wrapper around :func:`xr.align`.
+* Avoid allocating a floating license for COPT during the initial solver check
+
+**Bug fixes**
+
+* Ensure compatibility with xarray >= v2025.03.00
+
+Version 0.5.0
+--------------
+
+**Features**
+
+* Multiplication of a linear expression by a constant value may now introduce new
+  dimensions.
+* Added method `unstack` to `LinearExpression`, `Variable` and `Constraint` to unstack
+  a dimension.
+* Added extra argument in io methods `explicit_coordinate_names` to allow for export of
+  variables and constraints with explicit coordinate names.
+
+**Bug fixes**
+
+* The internal handling of `Solution` objects was improved for more consistency.
+  Solution objects created from solver calls now preserve the exact index names from
+  the input file.
+
+Version 0.4.4
+--------------
+
+* **IMPORTANT BUGFIX**: The last slice of constraints was not correctly written to LP files in case the constraint size was not a multiple of the slice size. This is fixed now.
+* Solution files that following a different naming scheme of variables and constraints using more than on initial letter in the prefix (e.g. `col123`, `row456`) are now supported.
+* GLPK solver is always called with the `--freemps` option instead of the `--mps` when using the Solver API to solve an external MPS file. `--mps` is for the older fixed-column MPS format that is rarely used nowadays. Almost all fixed MPS files can be parsed by the free MPS format.
+
+Version 0.4.3
+--------------
+
+* **Version 0.4.3 includes a major bug and can not be installed anymore.**
+* When creating slices for variables and constraints (important for the `solve` function), the slicing is now fixed in case no dimension to slice is available.
+* Added a pandas priority attribute. With this change, the operation with pandas objects is now prioritizing linopy objects over pandas objects. This is useful when the using linopy objects in arithmetic operations with pandas objects, e.g. `a * x` where `a` is a pandas Series/DataFrame and `x` is a linopy variable.
+* The method :meth:`model.to_file <linopy.model.Model.to_file>` now includes a progress argument to enable or disable the progress bar while writing.
+
+Version 0.4.2
+--------------
+
+* **Version 0.4.2 includes a major bug and can not be installed anymore.**
+* Fix the file handler to properly close the file when reading the sense from a problem file.
+
+Version 0.4.1
+--------------
+
+* Fix the `slice_size` argument in the `solve` function. The argument was not properly passed to the `to_file` function.
+* Fix the slicing of constraints in case the term dimension is larger than the leading constraint coordinate dimension.
+
+Version 0.4.0
+--------------
+
+* When writing out an LP file, large variables and constraints are now chunked to avoid memory issues. This is especially useful for large models with constraints with many terms. The chunk size can be set with the `slice_size` argument in the `solve` function.
+* Constraints which of the form `<= infinity` and `>= -infinity` are now automatically filtered out when solving. The `solve` function now has a new argument `sanitize_infinities` to control this feature. Default is set to `True`.
+* The representation of linopy objects with multiindexed coordinates was improved to be more readable.
+* Grouping expressions is now supported on dimensions called "group" and dimensions that have the same name as the grouping object.
+* Grouping dimensions which have multiindexed coordinates is now supported.
+
+Version 0.3.15
+--------------
+
+* The group dimension when grouping by a pandas dataframe is now always `group`. This fixes the case that the dataframe contains a column named `name`.
+
 Version 0.3.14
 --------------
 

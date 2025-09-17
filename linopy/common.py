@@ -5,20 +5,24 @@ Linopy common module.
 This module contains commonly used functions.
 """
 
+from __future__ import annotations
+
 import operator
 import os
-from collections.abc import Hashable, Iterable, Mapping, Sequence
-from functools import reduce, wraps
+from collections.abc import Callable, Generator, Hashable, Iterable, Sequence
+from functools import partial, reduce, wraps
 from pathlib import Path
-from typing import Any, Callable, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 from warnings import warn
 
 import numpy as np
 import pandas as pd
 import polars as pl
-from numpy import arange
-from xarray import DataArray, Dataset, align, apply_ufunc, broadcast
-from xarray.core import indexing
+from numpy import arange, signedinteger
+from xarray import DataArray, Dataset, apply_ufunc, broadcast
+from xarray import align as xr_align
+from xarray.core import dtypes, indexing
+from xarray.core.types import JoinOptions, T_Alignable
 from xarray.namedarray.utils import is_dict_like
 
 from linopy.config import options
@@ -29,6 +33,26 @@ from linopy.constants import (
     SIGNS_pretty,
     sign_replace_dict,
 )
+from linopy.types import CoordsLike, DimsLike
+
+if TYPE_CHECKING:
+    from linopy.constraints import Constraint
+    from linopy.expressions import LinearExpression, QuadraticExpression
+    from linopy.variables import Variable
+
+
+def set_int_index(series: pd.Series) -> pd.Series:
+    """
+    Convert string index to int index.
+    """
+
+    if not series.empty and not pd.api.types.is_integer_dtype(series.index):
+        cutoff = count_initial_letters(str(series.index[0]))
+        try:
+            series.index = series.index.str[cutoff:].astype(int)
+        except ValueError:
+            series.index = series.index.str.replace(".*#", "", regex=True).astype(int)
+    return series
 
 
 def maybe_replace_sign(sign: str) -> str:
@@ -71,7 +95,7 @@ def maybe_replace_signs(sign: DataArray) -> DataArray:
     return apply_ufunc(func, sign, dask="parallelized", output_dtypes=[sign.dtype])
 
 
-def format_string_as_variable_name(name: Hashable):
+def format_string_as_variable_name(name: Hashable) -> str:
     """
     Format a string to a valid python variable name.
 
@@ -86,23 +110,25 @@ def format_string_as_variable_name(name: Hashable):
     return str(name).replace(" ", "_").replace("-", "_")
 
 
-def get_from_iterable(lst: Union[str, Iterable[Hashable], None], index: int):
+def get_from_iterable(lst: DimsLike | None, index: int) -> Any | None:
     """
     Returns the element at the specified index of the list, or None if the index
     is out of bounds.
     """
     if lst is None:
         return None
-    if not isinstance(lst, list):
+    if isinstance(lst, Sequence | Iterable):
         lst = list(lst)
+    else:
+        lst = [lst]
     return lst[index] if 0 <= index < len(lst) else None
 
 
 def pandas_to_dataarray(
-    arr: Union[pd.DataFrame, pd.Series],
-    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
-    dims: Union[Iterable[Hashable], None] = None,
-    **kwargs,
+    arr: pd.DataFrame | pd.Series,
+    coords: CoordsLike | None = None,
+    dims: DimsLike | None = None,
+    **kwargs: Any,
 ) -> DataArray:
     """
     Convert a pandas DataFrame or Series to a DataArray.
@@ -156,9 +182,9 @@ def pandas_to_dataarray(
 
 def numpy_to_dataarray(
     arr: np.ndarray,
-    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
-    dims: Union[str, Iterable[Hashable], None] = None,
-    **kwargs,
+    coords: CoordsLike | None = None,
+    dims: DimsLike | None = None,
+    **kwargs: Any,
 ) -> DataArray:
     """
     Convert a numpy array to a DataArray.
@@ -179,25 +205,31 @@ def numpy_to_dataarray(
         DataArray:
             The converted DataArray.
     """
+    # fallback case for zero dim arrays
+    if arr.ndim == 0:
+        return DataArray(arr.item(), coords=coords, dims=dims, **kwargs)
+
     ndim = max(arr.ndim, 0 if coords is None else len(coords))
-    if isinstance(dims, str):
+    if isinstance(dims, Iterable | Sequence):
+        dims = list(dims)
+    elif dims is not None:
         dims = [dims]
 
-    if dims is not None and len(list(dims)):
+    if dims is not None and len(dims):
         # fill up dims with default names to match the number of dimensions
         dims = [get_from_iterable(dims, i) or f"dim_{i}" for i in range(ndim)]
 
-    if isinstance(coords, list) and dims is not None and len(list(dims)):
+    if isinstance(coords, list) and dims is not None and len(dims):
         coords = dict(zip(dims, coords))
 
     return DataArray(arr, coords=coords, dims=dims, **kwargs)
 
 
 def as_dataarray(
-    arr,
-    coords: Union[Sequence[Union[Sequence, pd.Index, DataArray]], Mapping, None] = None,
-    dims: Union[str, Iterable[Hashable], None] = None,
-    **kwargs,
+    arr: Any,
+    coords: CoordsLike | None = None,
+    dims: DimsLike | None = None,
+    **kwargs: Any,
 ) -> DataArray:
     """
     Convert an object to a DataArray.
@@ -218,11 +250,13 @@ def as_dataarray(
         DataArray:
             The converted DataArray.
     """
-    if isinstance(arr, (pd.Series, pd.DataFrame)):
+    if isinstance(arr, pd.Series | pd.DataFrame):
         arr = pandas_to_dataarray(arr, coords=coords, dims=dims, **kwargs)
     elif isinstance(arr, np.ndarray):
         arr = numpy_to_dataarray(arr, coords=coords, dims=dims, **kwargs)
-    elif isinstance(arr, (np.number, int, float, str, bool, list)):
+    elif isinstance(arr, np.number):
+        arr = DataArray(float(arr), coords=coords, dims=dims, **kwargs)
+    elif isinstance(arr, int | float | str | bool | list):
         arr = DataArray(arr, coords=coords, dims=dims, **kwargs)
 
     elif not isinstance(arr, DataArray):
@@ -246,7 +280,10 @@ def as_dataarray(
 
 
 # TODO: rename to to_pandas_dataframe
-def to_dataframe(ds: Dataset, mask_func: Union[Callable, None] = None):
+def to_dataframe(
+    ds: Dataset,
+    mask_func: Callable[[dict[Hashable, np.ndarray]], pd.Series] | None = None,
+) -> pd.DataFrame:
     """
     Convert an xarray Dataset to a pandas DataFrame.
 
@@ -269,7 +306,7 @@ def to_dataframe(ds: Dataset, mask_func: Union[Callable, None] = None):
     return pd.DataFrame(datadict, copy=False)
 
 
-def check_has_nulls(df: pd.DataFrame, name: str):
+def check_has_nulls(df: pd.DataFrame, name: str) -> None:
     any_nan = df.isna().any()
     if any_nan.any():
         fields = ", ".join(df.columns[any_nan].to_list())
@@ -289,9 +326,11 @@ def infer_schema_polars(ds: Dataset) -> dict[Hashable, pl.DataType]:
         dict: A dictionary mapping column names to their corresponding Polars data types.
     """
     schema = {}
+    np_major_version = int(np.__version__.split(".")[0])
+    use_int32 = os.name == "nt" and np_major_version < 2
     for name, array in ds.items():
         if np.issubdtype(array.dtype, np.integer):
-            schema[name] = pl.Int32 if os.name == "nt" else pl.Int64
+            schema[name] = pl.Int32 if use_int32 else pl.Int64
         elif np.issubdtype(array.dtype, np.floating):
             schema[name] = pl.Float64  # type: ignore
         elif np.issubdtype(array.dtype, np.bool_):
@@ -303,7 +342,7 @@ def infer_schema_polars(ds: Dataset) -> dict[Hashable, pl.DataType]:
     return schema  # type: ignore
 
 
-def to_polars(ds: Dataset, **kwargs) -> pl.DataFrame:
+def to_polars(ds: Dataset, **kwargs: Any) -> pl.DataFrame:
     """
     Convert an xarray Dataset to a polars DataFrame.
 
@@ -324,22 +363,35 @@ def to_polars(ds: Dataset, **kwargs) -> pl.DataFrame:
 
 def check_has_nulls_polars(df: pl.DataFrame, name: str = "") -> None:
     """
-    Checks if the given DataFrame contains any null values and raises a ValueError if it does.
+    Checks if the given DataFrame contains any null or NaN values and raises a ValueError if it does.
 
     Args:
     ----
-        df (pl.DataFrame): The DataFrame to check for null values.
+        df (pl.DataFrame): The DataFrame to check for null or NaN values.
         name (str): The name of the data container being checked.
 
     Raises:
     ------
-        ValueError: If the DataFrame contains null values,
-        a ValueError is raised with a message indicating the name of the constraint and the fields containing null values.
+        ValueError: If the DataFrame contains null or NaN values,
+        a ValueError is raised with a message indicating the name of the constraint and the fields containing null/NaN values.
     """
+    # Check for null values in all columns
     has_nulls = df.select(pl.col("*").is_null().any())
     null_columns = [col for col in has_nulls.columns if has_nulls[col][0]]
-    if null_columns:
-        raise ValueError(f"{name} contains nan's in field(s) {null_columns}")
+
+    # Check for NaN values only in numeric columns (avoid enum/categorical columns)
+    numeric_cols = [
+        col for col, dtype in zip(df.columns, df.dtypes) if dtype.is_numeric()
+    ]
+
+    nan_columns = []
+    if numeric_cols:
+        has_nans = df.select(pl.col(numeric_cols).is_nan().any())
+        nan_columns = [col for col in has_nans.columns if has_nans[col][0]]
+
+    invalid_columns = list(set(null_columns + nan_columns))
+    if invalid_columns:
+        raise ValueError(f"{name} contains nan's in field(s) {invalid_columns}")
 
 
 def filter_nulls_polars(df: pl.DataFrame) -> pl.DataFrame:
@@ -390,18 +442,18 @@ def group_terms_polars(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def save_join(*dataarrays: DataArray, integer_dtype: bool = False):
+def save_join(*dataarrays: DataArray, integer_dtype: bool = False) -> Dataset:
     """
     Join multiple xarray Dataarray's to a Dataset and warn if coordinates are not equal.
     """
     try:
-        arrs = align(*dataarrays, join="exact")
+        arrs = xr_align(*dataarrays, join="exact")
     except ValueError:
         warn(
             "Coordinates across variables not equal. Perform outer join.",
             UserWarning,
         )
-        arrs = align(*dataarrays, join="outer")
+        arrs = xr_align(*dataarrays, join="outer")
         if integer_dtype:
             arrs = tuple([ds.fillna(-1).astype(int) for ds in arrs])
     return Dataset({ds.name: ds for ds in arrs})
@@ -439,7 +491,9 @@ def fill_missing_coords(ds: DataArray, fill_helper_dims: bool = False) -> DataAr
 def fill_missing_coords(ds: Dataset, fill_helper_dims: bool = False) -> Dataset: ...
 
 
-def fill_missing_coords(ds, fill_helper_dims: bool = False):
+def fill_missing_coords(
+    ds: DataArray | Dataset, fill_helper_dims: bool = False
+) -> Dataset | DataArray:
     """
     Fill coordinates of a xarray Dataset or DataArray with integer coordinates.
 
@@ -454,7 +508,7 @@ def fill_missing_coords(ds, fill_helper_dims: bool = False):
 
     """
     ds = ds.copy()
-    if not isinstance(ds, (Dataset, DataArray)):
+    if not isinstance(ds, Dataset | DataArray):
         raise TypeError(f"Expected xarray.DataArray or xarray.Dataset, got {type(ds)}.")
 
     skip_dims = [] if fill_helper_dims else HELPER_DIMS
@@ -467,11 +521,128 @@ def fill_missing_coords(ds, fill_helper_dims: bool = False):
     return ds
 
 
-def _remap(array, mapping):
+T = TypeVar("T", Dataset, "Variable", "LinearExpression", "Constraint")
+
+
+@overload
+def iterate_slices(
+    ds: Dataset,
+    slice_size: int | None = 10_000,
+    slice_dims: list | None = None,
+) -> Generator[Dataset, None, None]: ...
+
+
+@overload
+def iterate_slices(
+    ds: Variable,
+    slice_size: int | None = 10_000,
+    slice_dims: list | None = None,
+) -> Generator[Variable, None, None]: ...
+
+
+@overload
+def iterate_slices(
+    ds: LinearExpression,
+    slice_size: int | None = 10_000,
+    slice_dims: list | None = None,
+) -> Generator[LinearExpression, None, None]: ...
+
+
+@overload
+def iterate_slices(
+    ds: Constraint,
+    slice_size: int | None = 10_000,
+    slice_dims: list | None = None,
+) -> Generator[Constraint, None, None]: ...
+
+
+def iterate_slices(
+    ds: T,
+    slice_size: int | None = 10_000,
+    slice_dims: list | None = None,
+) -> Generator[T, None, None]:
+    """
+    Generate slices of an xarray Dataset or DataArray with a specified soft maximum size.
+
+    The slicing is performed on the largest dimension of the input object.
+    If the maximum size is larger than the total size of the object, the function yields
+    the original object.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset or xarray.DataArray
+        The input xarray Dataset or DataArray to be sliced.
+    slice_size : int
+        The maximum number of elements in each slice. If the maximum size is too small to accommodate any slice,
+        the function splits the largest dimension.
+    slice_dims : list, optional
+        The dimensions to slice along. If None, all dimensions in `coord_dims` are used if
+        `coord_dims` is an attribute of the input object. Otherwise, all dimensions are used.
+
+    Yields
+    ------
+    xarray.Dataset or xarray.DataArray
+        A slice of the input Dataset or DataArray.
+
+    """
+    if slice_dims is None:
+        slice_dims = list(getattr(ds, "coord_dims", ds.dims))
+
+    if not set(slice_dims).issubset(ds.dims):
+        raise ValueError(
+            "Invalid slice dimensions. Must be a subset of the dataset dimensions."
+        )
+
+    # Calculate the total number of elements in the dataset
+    size = np.prod([ds.sizes[dim] for dim in ds.dims], dtype=int)
+
+    if slice_size is None or size <= slice_size:
+        yield ds
+        return
+
+    # number of slices
+    n_slices = max((size + slice_size - 1) // slice_size, 1)
+
+    # leading dimension (the dimension with the largest size)
+    sizes = {dim: ds.sizes[dim] for dim in slice_dims}
+    if not sizes:
+        yield ds
+        return
+
+    leading_dim = max(sizes, key=sizes.get)  # type: ignore
+    size_of_leading_dim = ds.sizes[leading_dim]
+
+    if size_of_leading_dim < n_slices:
+        n_slices = size_of_leading_dim
+
+    chunk_size = (ds.sizes[leading_dim] + n_slices - 1) // n_slices
+
+    # Iterate over the Cartesian product of slice indices
+    for i in range(n_slices):
+        start = i * chunk_size
+        end = min(start + chunk_size, size_of_leading_dim)
+        slice_dict = {leading_dim: slice(start, end)}
+        yield ds.isel(slice_dict)
+
+
+def _remap(array: np.ndarray, mapping: np.ndarray) -> np.ndarray:
     return mapping[array.ravel()].reshape(array.shape)
 
 
-def replace_by_map(ds, mapping):
+def count_initial_letters(word: str) -> int:
+    """
+    Count the number of initial letters in a word.
+    """
+    count = 0
+    for char in word:
+        if char.isalpha():
+            count += 1
+        else:
+            break
+    return count
+
+
+def replace_by_map(ds: DataArray, mapping: np.ndarray) -> DataArray:
     """
     Replace values in a DataArray by a one-dimensional mapping.
     """
@@ -484,14 +655,14 @@ def replace_by_map(ds, mapping):
     )
 
 
-def to_path(path: Union[str, Path, None]) -> Union[Path, None]:
+def to_path(path: str | Path | None) -> Path | None:
     """
     Convert a string to a Path object.
     """
     return Path(path) if path is not None else None
 
 
-def best_int(max_value: int) -> type:
+def best_int(max_value: int) -> type[signedinteger[Any]]:
     """
     Get the minimal int dtype for storing values <= max_value.
     """
@@ -501,7 +672,7 @@ def best_int(max_value: int) -> type:
     raise ValueError(f"Value {max_value} is too large for int64.")
 
 
-def get_index_map(*arrays):
+def get_index_map(*arrays: Sequence[Hashable]) -> dict[tuple, int]:
     """
     Given arrays of hashable objects, create a map from unique combinations to unique integers.
     """
@@ -511,7 +682,9 @@ def get_index_map(*arrays):
     return {combination: i for i, combination in enumerate(unique_combinations)}
 
 
-def generate_indices_for_printout(dim_sizes, max_lines):
+def generate_indices_for_printout(
+    dim_sizes: Sequence[int], max_lines: int
+) -> Generator[tuple[int | np.signedinteger[Any], ...] | None, None, None]:
     total_lines = int(np.prod(dim_sizes))
     lines_to_skip = total_lines - max_lines + 1 if total_lines > max_lines else 0
     if lines_to_skip > 0:
@@ -526,7 +699,7 @@ def generate_indices_for_printout(dim_sizes, max_lines):
             yield tuple(np.unravel_index(i, dim_sizes))
 
 
-def align_lines_by_delimiter(lines: list[str], delimiter: Union[str, list[str]]):
+def align_lines_by_delimiter(lines: list[str], delimiter: str | list[str]) -> list[str]:
     # Determine the maximum position of the delimiter
     if isinstance(delimiter, str):
         delimiter = [delimiter]
@@ -547,18 +720,46 @@ def align_lines_by_delimiter(lines: list[str], delimiter: Union[str, list[str]])
     return formatted_lines
 
 
+def get_dims_with_index_levels(
+    ds: Dataset, dims: Sequence[Hashable] | None = None
+) -> list[str]:
+    """
+    Get the dimensions of a Dataset with their index levels.
+
+    Example usage with a dataset that has:
+    - regular dimension 'time'
+    - multi-indexed dimension 'station' with levels ['country', 'city']
+    The output would be: ['time', 'station (country, city)']
+    """
+    dims_with_levels = []
+    if dims is None:
+        dims = list(ds.dims)
+
+    for dim in dims:
+        if isinstance(ds.indexes[dim], pd.MultiIndex):
+            # For multi-indexed dimensions, format as "dim (level0, level1, ...)"
+            names = ds.indexes[dim].names
+            dims_with_levels.append(f"{dim} ({', '.join(names)})")
+        else:
+            # For regular dimensions, just add the dimension name
+            dims_with_levels.append(str(dim))
+
+    return dims_with_levels
+
+
 def get_label_position(
-    obj, values: Union[int, np.ndarray]
-) -> Union[
-    Union[tuple[str, dict], tuple[None, None]],
-    list[Union[tuple[str, dict], tuple[None, None]]],
-    list[list[Union[tuple[str, dict], tuple[None, None]]]],
-]:
+    obj: Any, values: int | np.ndarray
+) -> (
+    tuple[str, dict]
+    | tuple[None, None]
+    | list[tuple[str, dict] | tuple[None, None]]
+    | list[list[tuple[str, dict] | tuple[None, None]]]
+):
     """
     Get tuple of name and coordinate for variable labels.
     """
 
-    def find_single(value: int) -> Union[tuple[str, dict], tuple[None, None]]:
+    def find_single(value: int) -> tuple[str, dict] | tuple[None, None]:
         if value == -1:
             return None, None
         for name, val in obj.items():
@@ -591,13 +792,45 @@ def get_label_position(
         raise ValueError("Array's with more than two dimensions is not supported")
 
 
-def print_coord(coord):
-    if isinstance(coord, dict):
-        coord = coord.values()
-    return "[" + ", ".join([str(c) for c in coord]) + "]" if len(coord) else ""
+def print_coord(coord: dict[str, Any] | Iterable[Any]) -> str:
+    """
+    Format coordinates into a string representation.
+
+    Args:
+        coord: Dictionary or iterable containing coordinate values.
+              Values can be numbers, strings, or nested iterables.
+
+    Returns:
+        Formatted string representation of coordinates in brackets,
+        with nested coordinates grouped in parentheses.
+
+    Examples:
+        >>> print_coord({"x": 1, "y": 2})
+        '[1, 2]'
+        >>> print_coord([1, 2, 3])
+        '[1, 2, 3]'
+        >>> print_coord([(1, 2), (3, 4)])
+        '[(1, 2), (3, 4)]'
+    """
+    # Handle empty input
+    if not coord:
+        return ""
+
+    # Extract values if input is dictionary
+    values = coord.values() if isinstance(coord, dict) else coord
+
+    # Convert each coordinate component to string
+    formatted = []
+    for value in values:
+        if isinstance(value, list | tuple):
+            formatted.append(f"({', '.join(str(x) for x in value)})")
+        else:
+            formatted.append(str(value))
+
+    return f"[{', '.join(formatted)}]"
 
 
-def print_single_variable(model, label):
+def print_single_variable(model: Any, label: int) -> str:
     if label == -1:
         return "None"
 
@@ -617,15 +850,21 @@ def print_single_variable(model, label):
     return f"{name}{print_coord(coord)}{bounds}"
 
 
-def print_single_expression(c, v, const, model):
+def print_single_expression(
+    c: np.ndarray,
+    v: np.ndarray,
+    const: float,
+    model: Any,
+) -> str:
     """
     Print a single linear expression based on the coefficients and variables.
     """
-
     c, v = np.atleast_1d(c), np.atleast_1d(v)
 
     # catch case that to many terms would be printed
-    def print_line(expr, const):
+    def print_line(
+        expr: list[tuple[float, tuple[str, Any] | list[tuple[str, Any]]]], const: float
+    ) -> str:
         res = []
         for i, (coeff, var) in enumerate(expr):
             coeff_string = f"{coeff:+.4g}"
@@ -684,7 +923,7 @@ def print_single_expression(c, v, const, model):
     return print_line(expr, const)
 
 
-def print_single_constraint(model, label):
+def print_single_constraint(model: Any, label: int) -> str:
     constraints = model.constraints
     name, coord = constraints.get_label_position(label)
 
@@ -699,13 +938,13 @@ def print_single_constraint(model, label):
     return f"{name}{print_coord(coord)}: {expr} {sign} {rhs:.12g}"
 
 
-def has_optimized_model(func):
+def has_optimized_model(func: Callable[..., Any]) -> Callable[..., Any]:
     """
     Check if a reference model is set.
     """
 
     @wraps(func)
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         if self.model is None:
             raise AttributeError("No reference model set.")
         if self.model.status != "ok":
@@ -715,18 +954,16 @@ def has_optimized_model(func):
     return wrapper
 
 
-def is_constant(func):
+def is_constant(func: Callable[..., Any]) -> Callable[..., Any]:
     from linopy import expressions, variables
 
     @wraps(func)
-    def wrapper(self, arg):
+    def wrapper(self: Any, arg: Any) -> Any:
         if isinstance(
             arg,
-            (
-                variables.Variable,
-                variables.ScalarVariable,
-                expressions.LinearExpression,
-            ),
+            variables.Variable
+            | variables.ScalarVariable
+            | expressions.LinearExpression,
         ):
             raise TypeError(f"Assigned rhs must be a constant, got {type(arg)}).")
         return func(self, arg)
@@ -734,16 +971,15 @@ def is_constant(func):
     return wrapper
 
 
-def forward_as_properties(**routes):
+def forward_as_properties(**routes: list[str]) -> Callable[[type], type]:
     #
-    def add_accessor(cls, item, attr):
-        @property
-        def get(self):
+    def add_accessor(cls: Any, item: str, attr: str) -> None:
+        def get(self: Any) -> Any:
             return getattr(getattr(self, item), attr)
 
-        setattr(cls, attr, get)
+        setattr(cls, attr, property(get))
 
-    def deco(cls):
+    def deco(cls: Any) -> Any:
         for item, attrs in routes.items():
             for attr in attrs:
                 add_accessor(cls, item, attr)
@@ -770,15 +1006,156 @@ def check_common_keys_values(list_of_dicts: list[dict[str, Any]]) -> bool:
     return all(len({d[k] for d in list_of_dicts if k in d}) == 1 for k in common_keys)
 
 
-class LocIndexer:
-    __slots__ = ("object",)
+def align(
+    *objects: LinearExpression | QuadraticExpression | Variable | T_Alignable,
+    join: JoinOptions = "inner",
+    copy: bool = True,
+    indexes: Any = None,
+    exclude: str | Iterable[Hashable] = frozenset(),
+    fill_value: Any = dtypes.NA,
+) -> tuple[LinearExpression | QuadraticExpression | Variable | T_Alignable, ...]:
+    """
+    Given any number of Variables, Expressions, Dataset and/or DataArray objects,
+    returns new objects with aligned indexes and dimension sizes.
 
-    def __init__(self, obj):
+    Array from the aligned objects are suitable as input to mathematical
+    operators, because along each dimension they have the same index and size.
+
+    Missing values (if ``join != 'inner'``) are filled with ``fill_value``.
+    The default fill value is NaN.
+
+    This functions essentially wraps the xarray function
+    :py:func:`xarray.align`.
+
+    Parameters
+    ----------
+    *objects : Variable, LinearExpression, Dataset or DataArray
+        Objects to align.
+    join : {"outer", "inner", "left", "right", "exact", "override"}, optional
+        Method for joining the indexes of the passed objects along each
+        dimension:
+
+        - "outer": use the union of object indexes
+        - "inner": use the intersection of object indexes
+        - "left": use indexes from the first object with each dimension
+        - "right": use indexes from the last object with each dimension
+        - "exact": instead of aligning, raise `ValueError` when indexes to be
+        aligned are not equal
+        - "override": if indexes are of same size, rewrite indexes to be
+        those of the first object with that dimension. Indexes for the same
+        dimension must have the same size in all objects.
+
+    copy : bool, default: True
+        If ``copy=True``, data in the return values is always copied. If
+        ``copy=False`` and reindexing is unnecessary, or can be performed with
+        only slice operations, then the output may share memory with the input.
+        In either case, new xarray objects are always returned.
+    indexes : dict-like, optional
+        Any indexes explicitly provided with the `indexes` argument should be
+        used in preference to the aligned indexes.
+    exclude : str, iterable of hashable or None, optional
+        Dimensions that must be excluded from alignment
+    fill_value : scalar or dict-like, optional
+        Value to use for newly missing values. If a dict-like, maps
+        variable names to fill values. Use a data array's name to
+        refer to its values.
+
+    Returns
+    -------
+    aligned : tuple of DataArray or Dataset
+        Tuple of objects with the same type as `*objects` with aligned
+        coordinates.
+
+
+    """
+    from linopy.expressions import LinearExpression, QuadraticExpression
+    from linopy.variables import Variable
+
+    finisher: list[partial[Any] | Callable[[Any], Any]] = []
+    das: list[Any] = []
+    for obj in objects:
+        if isinstance(obj, LinearExpression | QuadraticExpression):
+            finisher.append(partial(obj.__class__, model=obj.model))
+            das.append(obj.data)
+        elif isinstance(obj, Variable):
+            finisher.append(
+                partial(
+                    obj.__class__,
+                    model=obj.model,
+                    name=obj.data.attrs["name"],
+                    skip_broadcast=True,
+                )
+            )
+            das.append(obj.data)
+        else:
+            finisher.append(lambda x: x)
+            das.append(obj)
+
+    exclude = frozenset(exclude).union(HELPER_DIMS)
+    aligned = xr_align(
+        *das,
+        join=join,
+        copy=copy,
+        indexes=indexes,
+        exclude=exclude,
+        fill_value=fill_value,
+    )
+    return tuple([f(da) for f, da in zip(finisher, aligned)])
+
+
+LocT = TypeVar(
+    "LocT",
+    "Dataset",
+    "Variable",
+    "LinearExpression",
+    "QuadraticExpression",
+    "Constraint",
+)
+
+
+class LocIndexer(Generic[LocT]):
+    __slots__ = ("object",)
+    object: LocT
+
+    def __init__(self, obj: LocT) -> None:
         self.object = obj
 
-    def __getitem__(self, key) -> Dataset:
+    def __getitem__(
+        self, key: dict[Hashable, Any] | tuple | slice | int | list
+    ) -> LocT:
         if not is_dict_like(key):
             # expand the indexer so we can handle Ellipsis
             labels = indexing.expanded_indexer(key, self.object.ndim)
             key = dict(zip(self.object.dims, labels))
         return self.object.sel(key)
+
+
+class EmptyDeprecationWrapper:
+    """
+    Temporary wrapper for a smooth transition from .empty() to .empty
+
+    Use `bool(expr.empty)` to explicitly unwrap.
+
+    See Also
+    --------
+    https://github.com/PyPSA/linopy/pull/425
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: bool):
+        self.value = value
+
+    def __bool__(self) -> bool:
+        return self.value
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+    def __call__(self) -> bool:
+        warn(
+            "Calling `.empty()` is deprecated, use `.empty` property instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.value

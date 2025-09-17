@@ -10,10 +10,10 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from tempfile import NamedTemporaryFile, gettempdir
-from typing import Any
+from typing import Any, overload
 
 import numpy as np
 import pandas as pd
@@ -28,12 +28,21 @@ from xarray.core.types import T_Chunks
 from linopy import solvers
 from linopy.common import (
     as_dataarray,
+    assign_multiindex_safe,
     best_int,
     maybe_replace_signs,
     replace_by_map,
+    set_int_index,
     to_path,
 )
-from linopy.constants import HELPER_DIMS, TERM_DIM, ModelStatus, TerminationCondition
+from linopy.constants import (
+    GREATER_EQUAL,
+    HELPER_DIMS,
+    LESS_EQUAL,
+    TERM_DIM,
+    ModelStatus,
+    TerminationCondition,
+)
 from linopy.constraints import AnonymousScalarConstraint, Constraint, Constraints
 from linopy.expressions import (
     LinearExpression,
@@ -50,7 +59,13 @@ from linopy.io import (
 )
 from linopy.matrices import MatrixAccessor
 from linopy.objective import Objective
-from linopy.solvers import available_solvers, quadratic_solvers
+from linopy.remote import OetcHandler, RemoteHandler
+from linopy.solvers import (
+    IO_APIS,
+    NO_SOLUTION_FILE_SOLVERS,
+    available_solvers,
+    quadratic_solvers,
+)
 from linopy.types import (
     ConstantLike,
     ConstraintLike,
@@ -79,6 +94,26 @@ class Model:
     The model supports different solvers (see `linopy.available_solvers`) for
     the optimization process.
     """
+
+    solver_model: Any
+    solver_name: str
+    _variables: Variables
+    _constraints: Constraints
+    _objective: Objective
+    _parameters: Dataset
+    _solution: Dataset
+    _dual: Dataset
+    _status: str
+    _termination_condition: str
+    _xCounter: int
+    _cCounter: int
+    _varnameCounter: int
+    _connameCounter: int
+    _blocks: DataArray | None
+    _chunk: T_Chunks
+    _force_dim_names: bool
+    _solver_dir: Path
+    matrices: MatrixAccessor
 
     __slots__ = (
         # containers
@@ -171,14 +206,16 @@ class Model:
         return self._constraints
 
     @property
-    def objective(self):
+    def objective(self) -> Objective:
         """
         Objective assigned to the model.
         """
         return self._objective
 
     @objective.setter
-    def objective(self, obj) -> Objective:
+    def objective(
+        self, obj: Objective | LinearExpression | QuadraticExpression
+    ) -> Objective:
         if not isinstance(obj, Objective):
             obj = Objective(obj, self)
 
@@ -186,18 +223,18 @@ class Model:
         return self._objective
 
     @property
-    def sense(self):
+    def sense(self) -> str:
         """
         Sense of the objective function.
         """
         return self.objective.sense
 
     @sense.setter
-    def sense(self, value):
+    def sense(self, value: str) -> None:
         self.objective.sense = value
 
     @property
-    def parameters(self):
+    def parameters(self) -> Dataset:
         """
         Parameters assigned to the model.
 
@@ -207,7 +244,7 @@ class Model:
         return self._parameters
 
     @parameters.setter
-    def parameters(self, value):
+    def parameters(self, value: Dataset | Mapping) -> None:
         self._parameters = Dataset(value)
 
     @property
@@ -225,25 +262,25 @@ class Model:
         return self.constraints.dual
 
     @property
-    def status(self):
+    def status(self) -> str:
         """
         Status of the model.
         """
         return self._status
 
     @status.setter
-    def status(self, value):
+    def status(self, value: str) -> None:
         self._status = ModelStatus[value].value
 
     @property
-    def termination_condition(self):
+    def termination_condition(self) -> str:
         """
         Termination condition of the model.
         """
         return self._termination_condition
 
     @termination_condition.setter
-    def termination_condition(self, value):
+    def termination_condition(self, value: str) -> None:
         # TODO: remove if-clause, only kept for backward compatibility
         if value:
             self._termination_condition = TerminationCondition[value].value
@@ -251,18 +288,18 @@ class Model:
             self._termination_condition = value
 
     @property
-    def chunk(self):
+    def chunk(self) -> T_Chunks:
         """
         Chunk sizes of the model.
         """
         return self._chunk
 
     @chunk.setter
-    def chunk(self, value: T_Chunks):
+    def chunk(self, value: T_Chunks) -> None:
         self._chunk = value
 
     @property
-    def force_dim_names(self):
+    def force_dim_names(self) -> bool:
         """
         Whether assigned variables, constraints and data should always have
         custom dimension names, i.e. not matching dimension names "dim_0",
@@ -275,7 +312,7 @@ class Model:
         return self._force_dim_names
 
     @force_dim_names.setter
-    def force_dim_names(self, value):
+    def force_dim_names(self, value: bool) -> None:
         self._force_dim_names = bool(value)
 
     @property
@@ -286,8 +323,8 @@ class Model:
         return self._solver_dir
 
     @solver_dir.setter
-    def solver_dir(self, value):
-        if not isinstance(value, (str, Path)):
+    def solver_dir(self, value: str | Path) -> None:
+        if not isinstance(value, str | Path):
             raise TypeError("'solver_dir' must path-like.")
         self._solver_dir = Path(value)
 
@@ -358,6 +395,32 @@ class Model:
         else:
             return
 
+    def _check_valid_dim_names(self, ds: DataArray | Dataset) -> None:
+        """
+        Ensure that the added data does not lead to a naming conflict.
+
+        Parameters
+        ----------
+        model : linopy.Model
+        ds : xr.DataArray/Variable/LinearExpression
+            Data that should be added to the model.
+
+        Raises
+        ------
+        ValueError
+            If broadcasted data leads to unsupported dimension names.
+
+        Returns
+        -------
+        None.
+        """
+        unsupported_dim_names = ["labels", "coeffs", "vars", "sign", "rhs"]
+        if any(dim in unsupported_dim_names for dim in ds.dims):
+            raise ValueError(
+                "Added data contains unsupported dimension names. "
+                "Dimensions cannot be named 'labels', 'coeffs', 'vars', 'sign' or 'rhs'."
+            )
+
     def add_variables(
         self,
         lower: Any = -inf,
@@ -367,7 +430,7 @@ class Model:
         mask: DataArray | ndarray | Series | None = None,
         binary: bool = False,
         integer: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> Variable:
         """
         Assign a new, possibly multi-dimensional array of variables to the
@@ -465,6 +528,7 @@ class Model:
         )
         (data,) = xr.broadcast(data)
         self.check_force_dim_names(data)
+        self._check_valid_dim_names(data)
 
         if mask is not None:
             mask = as_dataarray(mask, coords=data.coords, dims=data.dims).astype(bool)
@@ -490,7 +554,11 @@ class Model:
 
     def add_constraints(
         self,
-        lhs: VariableLike | ExpressionLike | ConstraintLike,
+        lhs: VariableLike
+        | ExpressionLike
+        | ConstraintLike
+        | Sequence[tuple[ConstantLike, VariableLike | str]]
+        | Callable,
         sign: SignLike | None = None,
         rhs: ConstantLike | VariableLike | ExpressionLike | None = None,
         name: str | None = None,
@@ -553,7 +621,7 @@ class Model:
             if sign is None or rhs is None:
                 raise ValueError(msg_sign_rhs_not_none)
             data = lhs.to_constraint(sign, rhs).data
-        elif isinstance(lhs, (list, tuple)):
+        elif isinstance(lhs, list | tuple):
             if sign is None or rhs is None:
                 raise ValueError(msg_sign_rhs_none)
             data = self.linexpr(*lhs).to_constraint(sign, rhs).data
@@ -572,7 +640,7 @@ class Model:
             if sign is not None or rhs is not None:
                 raise ValueError(msg_sign_rhs_none)
             data = lhs.data
-        elif isinstance(lhs, (Variable, ScalarVariable, ScalarLinearExpression)):
+        elif isinstance(lhs, Variable | ScalarVariable | ScalarLinearExpression):
             if sign is None or rhs is None:
                 raise ValueError(msg_sign_rhs_not_none)
             data = lhs.to_linexpr().to_constraint(sign, rhs).data
@@ -580,6 +648,12 @@ class Model:
             raise ValueError(
                 f"Invalid type of `lhs` ({type(lhs)}) or invalid combination of `lhs`, `sign` and `rhs`."
             )
+
+        invalid_infinity_values = (
+            (data.sign == LESS_EQUAL) & (data.rhs == -np.inf)
+        ) | ((data.sign == GREATER_EQUAL) & (data.rhs == np.inf))  # noqa: F821
+        if invalid_infinity_values.any():
+            raise ValueError(f"Constraint {name} contains incorrect infinite values.")
 
         # ensure helper dimensions are not set as coordinates
         if drop_dims := set(HELPER_DIMS).intersection(data.coords):
@@ -592,9 +666,9 @@ class Model:
         if mask is not None:
             mask = as_dataarray(mask).astype(bool)
             # TODO: simplify
-            assert set(mask.dims).issubset(
-                data.dims
-            ), "Dimensions of mask not a subset of resulting labels dimensions."
+            assert set(mask.dims).issubset(data.dims), (
+                "Dimensions of mask not a subset of resulting labels dimensions."
+            )
 
         self.check_force_dim_names(data)
 
@@ -617,7 +691,10 @@ class Model:
 
     def add_objective(
         self,
-        expr: list[tuple[int, Variable]] | LinearExpression | QuadraticExpression,
+        expr: Variable
+        | LinearExpression
+        | QuadraticExpression
+        | Sequence[tuple[ConstantLike, VariableLike]],
         overwrite: bool = False,
         sense: str = "min",
     ) -> None:
@@ -637,10 +714,12 @@ class Model:
             The objective function assigned to the model.
         """
         if not overwrite:
-            assert self.objective.expression.empty(), (
+            assert self.objective.expression.empty, (
                 "Objective already defined."
                 " Set `overwrite` to True to force overwriting."
             )
+        if isinstance(expr, Variable):
+            expr = 1 * expr
         self.objective.expression = expr
         self.objective.sense = sense
 
@@ -666,7 +745,9 @@ class Model:
         for k in list(self.constraints):
             vars = self.constraints[k].data["vars"]
             vars = vars.where(~vars.isin(labels), -1)
-            self.constraints[k].data["vars"] = vars
+            self.constraints[k]._data = assign_multiindex_safe(
+                self.constraints[k].data, vars=vars
+            )
 
         self.objective = self.objective.sel(
             {TERM_DIM: ~self.objective.vars.isin(labels)}
@@ -776,14 +857,14 @@ class Model:
         return (self._cCounter, self._xCounter)
 
     @property
-    def blocks(self):
+    def blocks(self) -> DataArray | None:
         """
         Blocks used as a basis to split the variables and constraint matrix.
         """
         return self._blocks
 
     @blocks.setter
-    def blocks(self, blocks: DataArray):
+    def blocks(self, blocks: DataArray) -> None:
         if not isinstance(blocks, DataArray):
             raise TypeError("Blocks must be of type DataArray")
         assert len(blocks.dims) == 1
@@ -802,7 +883,7 @@ class Model:
         """
         assert self.blocks is not None, "Blocks are not defined."
 
-        dtype = self.blocks.dtype
+        dtype = self.blocks.dtype.type
         self.variables.set_blocks(self.blocks)
         block_map = self.variables.get_blockmap(dtype)
         self.constraints.set_blocks(block_map)
@@ -810,19 +891,34 @@ class Model:
         blocks = replace_by_map(self.objective.vars, block_map)
         self.objective = self.objective.assign(blocks=blocks)
 
-    def linexpr(self, *args) -> LinearExpression:
+    @overload
+    def linexpr(
+        self, *args: Sequence[Sequence | pd.Index | DataArray] | Mapping
+    ) -> LinearExpression: ...
+
+    @overload
+    def linexpr(
+        self, *args: tuple[ConstantLike, str | Variable | ScalarVariable] | ConstantLike
+    ) -> LinearExpression: ...
+
+    def linexpr(
+        self,
+        *args: tuple[ConstantLike, str | Variable | ScalarVariable]
+        | ConstantLike
+        | Callable
+        | Sequence[Sequence | pd.Index | DataArray]
+        | Mapping,
+    ) -> LinearExpression:
         """
         Create a linopy.LinearExpression from argument list.
 
         Parameters
         ----------
-        args : tuples of (coefficients, variables) or tuples of
-               coordinates and a function
-            If args is a collection of coefficients-variables-tuples, the resulting
-            linear expression is built with the function LinearExpression.from_tuples.
-            In this case, each tuple represents on term in the linear expression,
-            which can span over multiple dimensions:
+        args : A mixture of tuples of (coefficients, variables) and constants
+            or a function and tuples of coordinates
 
+            If args is a collection of coefficients-variables-tuples and constants, the resulting
+            linear expression is built with the function LinearExpression.from_tuples.
             * coefficients : int/float/array_like
                 The coefficient(s) in the term, if the coefficients array
                 contains dimensions which do not appear in
@@ -830,6 +926,8 @@ class Model:
             * variables : str/array_like/linopy.Variable
                 The variable(s) going into the term. These may be referenced
                 by name.
+            * constant: int/float/array_like
+                The constant value to add to the expression
 
             If args is a collection of coordinates with an appended function at the
             end, the function LinearExpression.from_rule is used to build the linear
@@ -840,7 +938,7 @@ class Model:
                 The first argument of the function is the underlying `linopy.Model`.
                 The following arguments are given by the coordinates for accessing
                 the variables. The function has to return a
-                `ScalarLinearExpression`. Therefore use the direct getter when
+                `ScalarLinearExpression`. Therefore, use the direct getter when
                 indexing variables.
             * coords : coordinate-like
                 Coordinates to be processed by `xarray.DataArray`. For each
@@ -884,13 +982,18 @@ class Model:
                 "containing a tuple or a single set of coords must be given."
             )
             rule, coords = args
-            return LinearExpression.from_rule(self, rule, coords)
+            return LinearExpression.from_rule(self, rule, coords)  # type: ignore
         if not isinstance(args, tuple):
             raise TypeError(f"Not supported type {args}.")
-        tuples = [
-            (c, self.variables[v]) if isinstance(v, str) else (c, v) for (c, v) in args
-        ]
-        return LinearExpression.from_tuples(*tuples, chunk=self.chunk)
+
+        tuples: list[tuple[ConstantLike, VariableLike] | ConstantLike] = []
+        for arg in args:
+            if isinstance(arg, tuple):
+                c, v = arg
+                tuples.append((c, self.variables[v]) if isinstance(v, str) else (c, v))
+            else:
+                tuples.append(arg)
+        return LinearExpression.from_tuples(*tuples, model=self)
 
     @property
     def coefficientrange(self) -> DataFrame:
@@ -943,6 +1046,7 @@ class Model:
         self,
         solver_name: str | None = None,
         io_api: str | None = None,
+        explicit_coordinate_names: bool = False,
         problem_fn: str | Path | None = None,
         solution_fn: str | Path | None = None,
         log_fn: str | Path | None = None,
@@ -950,10 +1054,13 @@ class Model:
         warmstart_fn: str | Path | None = None,
         keep_files: bool = False,
         only_generate_problem_file: str | bool = False,
-        env: None = None,
+        env: Any = None,
         sanitize_zeros: bool = True,
-        remote: None = None,
-        **solver_options,
+        sanitize_infinities: bool = True,
+        slice_size: int = 2_000_000,
+        remote: RemoteHandler | OetcHandler = None,  # type: ignore
+        progress: bool | None = None,
+        **solver_options: Any,
     ) -> tuple[str, str]:
         """
         Solve the model with possibly different solvers.
@@ -973,6 +1080,11 @@ class Model:
             'direct' the problem is communicated to the solver via the solver
             specific API, e.g. gurobipy. This may lead to faster run times.
             The default is set to 'lp' if available.
+        explicit_coordinate_names : bool, optional
+            If the Api to use for communicating with the solver is based on 'lp',
+            this option allows to keep the variable and constraint names in the
+            lp file. This may lead to slower run times.
+            The default is set to False.
         problem_fn : path_like, optional
             Path of the lp file or output file/directory which is written out
             during the process. The default None results in a temporary file.
@@ -994,6 +1106,8 @@ class Model:
             Whether to keep all temporary files like lp file, solution file.
             This argument is ignored for the logger file `log_fn`. The default
             is False.
+        only_generate_problem_file: str | bool = False
+            When True, the linopy execution is stopped after the creation of the lp file
         env : gurobi.Env, optional
             Existing environment passed to the solver (e.g. `gurobipy.Env`).
             Currently only in use for Gurobi. The default is None.
@@ -1001,10 +1115,20 @@ class Model:
             Whether to set terms with zero coefficient as missing.
             This will remove unneeded overhead in the lp file writing.
             The default is True.
-        remote : linopy.remote.RemoteHandler
+        sanitize_infinities : bool, optional
+            Whether to filter out constraints that are subject to `<= inf` or `>= -inf`.
+        slice_size : int, optional
+            Size of the slice to use for writing the lp file. The slice size
+            is used to split large variables and constraints into smaller
+            chunks to avoid memory issues. The default is 2_000_000.
+        remote : linopy.remote.RemoteHandler | linopy.oetc.OetcHandler, optional
             Remote handler to use for solving model on a server. Note that when
             solving on a rSee
             linopy.remote.RemoteHandler for more details.
+        progress : bool, optional
+            Whether to show a progress bar of writing the lp file. The default is
+            None, which means that the progress bar is shown if the model has more
+            than 10000 variables and constraints.
         **solver_options : kwargs
             Options passed to the solver.
 
@@ -1017,20 +1141,29 @@ class Model:
         # clear cached matrix properties potentially present from previous solve commands
         self.matrices.clean_cached_properties()
 
-        if remote:
-            solved = remote.solve_on_remote(
-                self,
-                solver_name=solver_name,
-                io_api=io_api,
-                problem_fn=problem_fn,
-                solution_fn=solution_fn,
-                log_fn=log_fn,
-                basis_fn=basis_fn,
-                warmstart_fn=warmstart_fn,
-                keep_files=keep_files,
-                sanitize_zeros=sanitize_zeros,
-                **solver_options,
+        # check io_api
+        if io_api is not None and io_api not in IO_APIS:
+            raise ValueError(
+                f"Keyword argument `io_api` has to be one of {IO_APIS} or None"
             )
+
+        if remote is not None:
+            if isinstance(remote, OetcHandler):
+                solved = remote.solve_on_oetc(self)
+            else:
+                solved = remote.solve_on_remote(
+                    self,
+                    solver_name=solver_name,
+                    io_api=io_api,
+                    problem_fn=problem_fn,
+                    solution_fn=solution_fn,
+                    log_fn=log_fn,
+                    basis_fn=basis_fn,
+                    warmstart_fn=warmstart_fn,
+                    keep_files=keep_files,
+                    sanitize_zeros=sanitize_zeros,
+                    **solver_options,
+                )
 
             self.objective.set_value(solved.objective.value)
             self.status = solved.status
@@ -1065,13 +1198,18 @@ class Model:
 
         if problem_fn is None:
             problem_fn = self.get_problem_file(io_api=io_api)
-        if isinstance(problem_fn, str):
-            problem_fn = Path(problem_fn)
         if solution_fn is None:
-            solution_fn = self.get_solution_file()
+            if solver_name in NO_SOLUTION_FILE_SOLVERS and not keep_files:
+                # these (solver, keep_files=False) combos do not need a solution file
+                solution_fn = None
+            else:
+                solution_fn = self.get_solution_file()
 
         if sanitize_zeros:
             self.constraints.sanitize_zeros()
+
+        if sanitize_infinities:
+            self.constraints.sanitize_infinities()
 
         if self.is_quadratic and solver_name not in quadratic_solvers:
             raise ValueError(
@@ -1101,19 +1239,44 @@ class Model:
             sys.exit(0)
 
         try:
-            func = getattr(solvers, f"run_{solver_name}")
-            result = func(
-                self,
-                io_api=io_api,
-                problem_fn=to_path(problem_fn),
-                solution_fn=to_path(solution_fn),
-                log_fn=to_path(log_fn),
-                warmstart_fn=to_path(warmstart_fn),
-                basis_fn=to_path(basis_fn),
-                keep_files=keep_files,
-                env=env,
+            solver_class = getattr(solvers, f"{solvers.SolverName(solver_name).name}")
+            # initialize the solver as object of solver subclass <solver_class>
+            solver = solver_class(
                 **solver_options,
             )
+            if io_api == "direct":
+                # no problem file written and direct model is set for solver
+                result = solver.solve_problem_from_model(
+                    model=self,
+                    solution_fn=to_path(solution_fn),
+                    log_fn=to_path(log_fn),
+                    warmstart_fn=to_path(warmstart_fn),
+                    basis_fn=to_path(basis_fn),
+                    env=env,
+                    explicit_coordinate_names=explicit_coordinate_names,
+                )
+            else:
+                if solver_name in ["glpk", "cbc"] and explicit_coordinate_names:
+                    logger.warning(
+                        f"{solver_name} does not support writing names to lp files, disabling it."
+                    )
+                    explicit_coordinate_names = False
+                problem_fn = self.to_file(
+                    to_path(problem_fn),
+                    io_api=io_api,
+                    explicit_coordinate_names=explicit_coordinate_names,
+                    slice_size=slice_size,
+                    progress=progress,
+                )
+                result = solver.solve_problem_from_file(
+                    problem_fn=to_path(problem_fn),
+                    solution_fn=to_path(solution_fn),
+                    log_fn=to_path(log_fn),
+                    warmstart_fn=to_path(warmstart_fn),
+                    basis_fn=to_path(basis_fn),
+                    env=env,
+                )
+
         finally:
             for fn in (problem_fn, solution_fn):
                 if fn is not None and (os.path.exists(fn) and not keep_files):
@@ -1132,6 +1295,7 @@ class Model:
 
         # map solution and dual to original shape which includes missing values
         sol = result.solution.primal.copy()
+        sol = set_int_index(sol)
         sol.loc[-1] = nan
 
         for name, var in self.variables.items():
@@ -1144,6 +1308,7 @@ class Model:
 
         if not result.solution.dual.empty:
             dual = result.solution.dual.copy()
+            dual = set_int_index(dual)
             dual.loc[-1] = nan
 
             for name, con in self.constraints.items():
@@ -1160,40 +1325,172 @@ class Model:
         """
         Compute a set of infeasible constraints.
 
-        This function requires that the model was solved with `gurobi` and the
-        termination condition was infeasible.
+        This function requires that the model was solved with `gurobi` or `xpress`
+        and the termination condition was infeasible. The solver must have detected
+        the infeasibility during the solve process.
 
         Returns
         -------
-        labels : list
+        labels : list[int]
             Labels of the infeasible constraints.
         """
-        if "gurobi" not in available_solvers:
-            raise ImportError("Gurobi is required for this method.")
+        solver_model = getattr(self, "solver_model", None)
 
-        import gurobipy
+        # Check for Gurobi
+        if "gurobi" in available_solvers:
+            try:
+                import gurobipy
 
-        solver_model = getattr(self, "solver_model")
+                if solver_model is not None and isinstance(
+                    solver_model, gurobipy.Model
+                ):
+                    return self._compute_infeasibilities_gurobi(solver_model)
+            except ImportError:
+                pass
 
-        if not isinstance(solver_model, gurobipy.Model):
-            raise NotImplementedError("Solver model must be a Gurobi Model.")
+        # Check for Xpress
+        if "xpress" in available_solvers:
+            try:
+                import xpress
 
+                if solver_model is not None and isinstance(
+                    solver_model, xpress.problem
+                ):
+                    return self._compute_infeasibilities_xpress(solver_model)
+            except ImportError:
+                pass
+
+        # If we get here, either the solver doesn't support IIS or no solver model is available
+        if solver_model is None:
+            # Check if this is a supported solver without a stored model
+            solver_name = getattr(self, "solver_name", "unknown")
+            if solver_name in ["gurobi", "xpress"]:
+                raise ValueError(
+                    "No solver model available. The model must be solved first with "
+                    "'gurobi' or 'xpress' solver and the result must be infeasible."
+                )
+            else:
+                # This is an unsupported solver
+                raise NotImplementedError(
+                    f"Computing infeasibilities is not supported for '{solver_name}' solver. "
+                    "Only Gurobi and Xpress solvers support IIS computation."
+                )
+        else:
+            # We have a solver model but it's not a supported type
+            raise NotImplementedError(
+                "Computing infeasibilities is only supported for Gurobi and Xpress solvers. "
+                f"Current solver model type: {type(solver_model).__name__}"
+            )
+
+    def _compute_infeasibilities_gurobi(self, solver_model: Any) -> list[int]:
+        """Compute infeasibilities for Gurobi solver."""
         solver_model.computeIIS()
         f = NamedTemporaryFile(suffix=".ilp", prefix="linopy-iis-", delete=False)
         solver_model.write(f.name)
         labels = []
+        pattern = re.compile(r"^ [^:]+#([0-9]+):")
         for line in f.readlines():
             line_decoded = line.decode()
-            if line_decoded.startswith(" c"):
-                labels.append(int(line_decoded.split(":")[0][2:]))
+            try:
+                if line_decoded.startswith(" c"):
+                    labels.append(int(line_decoded.split(":")[0][2:]))
+            except ValueError as _:
+                match = pattern.match(line_decoded)
+                if match:
+                    labels.append(int(match.group(1)))
+        f.close()
         return labels
 
-    def print_infeasibilities(self, display_max_terms: None = None) -> None:
+    def _compute_infeasibilities_xpress(self, solver_model: Any) -> list[int]:
+        """Compute infeasibilities for Xpress solver."""
+        # Compute all IIS
+        solver_model.iisall()
+
+        # Get the number of IIS found
+        num_iis = solver_model.attributes.numiis
+        if num_iis == 0:
+            return []
+
+        labels = set()
+
+        # Create constraint mapping for efficient lookups
+        constraint_to_index = {
+            constraint: idx
+            for idx, constraint in enumerate(solver_model.getConstraint())
+        }
+
+        # Retrieve each IIS
+        for iis_num in range(1, num_iis + 1):
+            iis_constraints = self._extract_iis_constraints(solver_model, iis_num)
+
+            # Convert constraint objects to indices
+            for constraint_obj in iis_constraints:
+                if constraint_obj in constraint_to_index:
+                    labels.add(constraint_to_index[constraint_obj])
+                # Note: Silently skip constraints not found in mapping
+                # This can happen if the model structure changed after solving
+
+        return sorted(list(labels))
+
+    def _extract_iis_constraints(self, solver_model: Any, iis_num: int) -> list[Any]:
+        """
+        Extract constraint objects from a specific IIS.
+
+        Parameters
+        ----------
+        solver_model : xpress.problem
+            The Xpress solver model
+        iis_num : int
+            IIS number (1-indexed)
+
+        Returns
+        -------
+        list[Any]
+            List of xpress.constraint objects in the IIS
+        """
+        # Prepare lists to receive IIS data
+        miisrow: list[Any] = []  # xpress.constraint objects in the IIS
+        miiscol: list[Any] = []  # xpress.variable objects in the IIS
+        constrainttype: list[str] = []  # Constraint types ('L', 'G', 'E')
+        colbndtype: list[str] = []  # Column bound types
+        duals: list[float] = []  # Dual values
+        rdcs: list[float] = []  # Reduced costs
+        isolationrows: list[str] = []  # Row isolation info
+        isolationcols: list[str] = []  # Column isolation info
+
+        # Get IIS data from Xpress
+        solver_model.getiisdata(
+            iis_num,
+            miisrow,
+            miiscol,
+            constrainttype,
+            colbndtype,
+            duals,
+            rdcs,
+            isolationrows,
+            isolationcols,
+        )
+
+        return miisrow
+
+    def print_infeasibilities(self, display_max_terms: int | None = None) -> None:
         """
         Print a list of infeasible constraints.
 
-        This function requires that the model was solved with `gurobi` and the
-        termination condition was infeasible.
+        This function requires that the model was solved using `gurobi` or `xpress`
+        and the termination condition was infeasible.
+
+        Parameters
+        ----------
+        display_max_terms : int, optional
+            The maximum number of infeasible terms to display. If `None`,
+            all infeasible terms will be displayed.
+
+        Returns
+        -------
+        None
+            This function does not return anything. It simply prints the
+            infeasible constraints.
         """
         labels = self.compute_infeasibilities()
         self.constraints.print_labels(labels, display_max_terms=display_max_terms)
@@ -1205,7 +1502,7 @@ class Model:
         """
         Compute a set of infeasible constraints.
 
-        This function requires that the model was solved with `gurobi` and the
+        This function requires that the model was solved with `gurobi` or `xpress` and the
         termination condition was infeasible.
 
         Returns

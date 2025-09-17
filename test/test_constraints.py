@@ -6,6 +6,7 @@ Created on Wed Mar 10 11:23:13 2021.
 """
 
 import dask
+import dask.array.core
 import numpy as np
 import pandas as pd
 import pytest
@@ -17,11 +18,13 @@ from linopy.testing import assert_conequal
 # Test model functions
 
 
-def test_constraint_assignment():
-    m = Model()
+def test_constraint_assignment() -> None:
+    m: Model = Model()
 
-    lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
-    upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
+    lower: xr.DataArray = xr.DataArray(
+        np.zeros((10, 10)), coords=[range(10), range(10)]
+    )
+    upper: xr.DataArray = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
     x = m.add_variables(lower, upper, name="x")
     y = m.add_variables(name="y")
 
@@ -39,15 +42,40 @@ def test_constraint_assignment():
     assert_conequal(m.constraints.con0, con0)
 
 
-def test_constraints_getattr_formatted():
-    m = Model()
+def test_constraint_equality() -> None:
+    m: Model = Model()
+
+    lower: xr.DataArray = xr.DataArray(
+        np.zeros((10, 10)), coords=[range(10), range(10)]
+    )
+    upper: xr.DataArray = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
+    x = m.add_variables(lower, upper, name="x")
+    y = m.add_variables(name="y")
+
+    con0 = m.add_constraints(1 * x + 10 * y, EQUAL, 0)
+
+    assert_conequal(con0, 1 * x + 10 * y == 0, strict=False)
+    assert_conequal(1 * x + 10 * y == 0, 1 * x + 10 * y == 0, strict=False)
+
+    with pytest.raises(AssertionError):
+        assert_conequal(con0, 1 * x + 10 * y <= 0, strict=False)
+
+    with pytest.raises(AssertionError):
+        assert_conequal(con0, 1 * x + 10 * y >= 0, strict=False)
+
+    with pytest.raises(AssertionError):
+        assert_conequal(10 * y + 2 * x == 0, 1 * x + 10 * y == 0, strict=False)
+
+
+def test_constraints_getattr_formatted() -> None:
+    m: Model = Model()
     x = m.add_variables(0, 10, name="x")
     m.add_constraints(1 * x == 0, name="con-0")
     assert_conequal(m.constraints.con_0, m.constraints["con-0"])
 
 
-def test_anonymous_constraint_assignment():
-    m = Model()
+def test_anonymous_constraint_assignment() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
     upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
@@ -66,8 +94,8 @@ def test_anonymous_constraint_assignment():
     assert m.constraints.rhs.con0.dtype in (int, float)
 
 
-def test_constraint_assignment_with_tuples():
-    m = Model()
+def test_constraint_assignment_with_tuples() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
     upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
@@ -80,9 +108,9 @@ def test_constraint_assignment_with_tuples():
     assert m.constraints.labels.c.shape == (10, 10)
 
 
-def test_constraint_assignment_chunked():
+def test_constraint_assignment_chunked() -> None:
     # setting bounds with one pd.DataFrame and one pd.Series
-    m = Model(chunk=5)
+    m: Model = Model(chunk=5)
     lower = pd.DataFrame(np.zeros((10, 10)))
     upper = pd.Series(np.ones(10))
     x = m.add_variables(lower, upper)
@@ -95,8 +123,8 @@ def test_constraint_assignment_chunked():
     assert isinstance(m.constraints.coeffs.c.data, dask.array.core.Array)
 
 
-def test_constraint_assignment_with_reindex():
-    m = Model()
+def test_constraint_assignment_with_reindex() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
     upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
@@ -111,17 +139,17 @@ def test_constraint_assignment_with_reindex():
     assert (con.coords["dim_0"].values == shuffled_coords).all()
 
 
-def test_wrong_constraint_assignment_repeated():
+def test_wrong_constraint_assignment_repeated() -> None:
     # repeated variable assignment is forbidden
-    m = Model()
+    m: Model = Model()
     x = m.add_variables()
     m.add_constraints(x, LESS_EQUAL, 0, name="con")
     with pytest.raises(ValueError):
         m.add_constraints(x, LESS_EQUAL, 0, name="con")
 
 
-def test_masked_constraints():
-    m = Model()
+def test_masked_constraints() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
     upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
@@ -134,8 +162,8 @@ def test_masked_constraints():
     assert (m.constraints.labels.con0[5:10, :] == -1).all()
 
 
-def test_non_aligned_constraints():
-    m = Model()
+def test_non_aligned_constraints() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros(10), coords=[range(10)])
     x = m.add_variables(lower, name="x")
@@ -162,8 +190,8 @@ def test_non_aligned_constraints():
             assert np.issubdtype(dtype, np.floating)
 
 
-def test_constraints_flat():
-    m = Model()
+def test_constraints_flat() -> None:
+    m: Model = Model()
 
     lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
     upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
@@ -181,3 +209,25 @@ def test_constraints_flat():
 
     assert isinstance(m.constraints.flat, pd.DataFrame)
     assert not m.constraints.flat.empty
+
+
+def test_sanitize_infinities() -> None:
+    m: Model = Model()
+
+    lower = xr.DataArray(np.zeros((10, 10)), coords=[range(10), range(10)])
+    upper = xr.DataArray(np.ones((10, 10)), coords=[range(10), range(10)])
+    x = m.add_variables(lower, upper, name="x")
+    y = m.add_variables(name="y")
+
+    # Test correct infinities
+    m.add_constraints(x <= np.inf, name="con_inf")
+    m.add_constraints(y >= -np.inf, name="con_neg_inf")
+    m.constraints.sanitize_infinities()
+    assert (m.constraints["con_inf"].labels == -1).all()
+    assert (m.constraints["con_neg_inf"].labels == -1).all()
+
+    # Test incorrect infinities
+    with pytest.raises(ValueError):
+        m.add_constraints(x >= np.inf, name="con_wrong_inf")
+    with pytest.raises(ValueError):
+        m.add_constraints(y <= -np.inf, name="con_wrong_neg_inf")

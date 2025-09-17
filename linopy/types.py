@@ -1,17 +1,14 @@
-import sys
+from __future__ import annotations
+
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
 import numpy
 import numpy.typing
-from pandas import DataFrame, Series
+from pandas import DataFrame, Index, Series
 from xarray import DataArray
-
-if sys.version_info >= (3, 10):
-    from types import EllipsisType, NotImplementedType
-else:
-    EllipsisType = type(Ellipsis)
-    NotImplementedType = type(NotImplemented)
+from xarray.core.coordinates import DataArrayCoordinates, DatasetCoordinates
 
 if TYPE_CHECKING:
     from linopy.constraints import AnonymousScalarConstraint, Constraint
@@ -22,15 +19,33 @@ if TYPE_CHECKING:
     )
     from linopy.variables import ScalarVariable, Variable
 
-ConstantLike = Union[int, float, numpy.ndarray, DataArray, Series, DataFrame]
-SignLike = Union[str, numpy.ndarray, DataArray, Series, DataFrame]
+# Type aliases using Union for Python 3.9 compatibility
+CoordsLike = Union[  # noqa: UP007
+    Sequence[Sequence | Index | DataArray],
+    Mapping,
+    DataArrayCoordinates,
+    DatasetCoordinates,
+]
+DimsLike = Union[str, Iterable[Hashable]]  # noqa: UP007
+
+ConstantLike = Union[  # noqa: UP007
+    int,
+    float,
+    numpy.floating,
+    numpy.integer,
+    numpy.ndarray,
+    DataArray,
+    Series,
+    DataFrame,
+]
+SignLike = Union[str, numpy.ndarray, DataArray, Series, DataFrame]  # noqa: UP007
 VariableLike = Union["ScalarVariable", "Variable"]
 ExpressionLike = Union[
-    "ScalarLinearExpression", "LinearExpression", "QuadraticExpression"
+    "ScalarLinearExpression",
+    "LinearExpression",
+    "QuadraticExpression",
 ]
 ConstraintLike = Union["Constraint", "AnonymousScalarConstraint"]
-MaskLike = Union[numpy.ndarray, DataArray, Series, DataFrame]
-SideLike = Union[ConstantLike, VariableLike, ExpressionLike]
-
-
-PathLike = Union[str, Path]
+MaskLike = Union[numpy.ndarray, DataArray, Series, DataFrame]  # noqa: UP007
+SideLike = Union[ConstantLike, VariableLike, ExpressionLike]  # noqa: UP007
+PathLike = Union[str, Path]  # noqa: UP007

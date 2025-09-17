@@ -12,7 +12,7 @@
 &nbsp; &nbsp; &nbsp; &nbsp; **I**nteger\
 &nbsp; &nbsp; &nbsp; &nbsp; **N**on-linear\
 &nbsp; &nbsp; &nbsp; &nbsp; **O**ptimization in\
-&nbsp; &nbsp; &nbsp; &nbsp; **P Y**thon
+&nbsp; &nbsp; &nbsp; &nbsp; **PY**thon
 
 **linopy** is an open-source python package that facilitates **optimization** with **real world data**. It builds a bridge between data analysis packages like [xarray](https://github.com/pydata/xarray) & [pandas](https://pandas.pydata.org/) and problem solvers like [cbc](https://projects.coin-or.org/Cbc), [gurobi](https://www.gurobi.com/) (see the full list below). **Linopy** supports **Linear, Integer, Mixed-Integer and Quadratic Programming** while aiming to make linear programming in Python easy, highly-flexible and performant.
 
@@ -65,9 +65,9 @@ Linopy aims to make optimization programs transparent and flexible. To illustrat
 
 >>> m = linopy.Model()
 
->>> days = pd.Index(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'], name='day')
->>> apples = m.add_variables(lower=0, name='apples', coords=[days])
->>> bananas = m.add_variables(lower=0, name='bananas', coords=[days])
+>>> days = pd.Index(["Mon", "Tue", "Wed", "Thu", "Fri"], name="day")
+>>> apples = m.add_variables(lower=0, name="apples", coords=[days])
+>>> bananas = m.add_variables(lower=0, name="bananas", coords=[days])
 >>> apples
 ```
 ```
@@ -83,7 +83,7 @@ Variable (day: 5)
 Add daily vitamin constraints
 
 ```python
->>> m.add_constraints(3 * apples + 2 * bananas >= 8, name='daily_vitamins')
+>>> m.add_constraints(3 * apples + 2 * bananas >= 8, name="daily_vitamins")
 ```
 ```
 Constraint `daily_vitamins` (day: 5):
@@ -98,7 +98,7 @@ Constraint `daily_vitamins` (day: 5):
 Add weekly vitamin constraint
 
 ```python
->>> m.add_constraints((3 * apples + 2 * bananas).sum() >= 50, name='weekly_vitamins')
+>>> m.add_constraints((3 * apples + 2 * bananas).sum() >= 50, name="weekly_vitamins")
 ```
 ```
 Constraint `weekly_vitamins`
@@ -151,6 +151,20 @@ Fri    0          4
 * [COPT](https://www.shanshu.ai/copt)
 
 Note that these do have to be installed by the user separately.
+
+## Development Setup
+
+To set up a local development environment for linopy and to run the same tests that are run in the CI, you can run:
+
+```sh
+python -m venv venv
+source venv/bin/activate
+pip install uv
+uv pip install -e .[dev,solvers]
+pytest
+```
+
+The `-e` flag of the install command installs the `linopy` package in editable mode, which means that the virtualenv (and thus the tests) will run the code from your local checkout.
 
 ## Citing Linopy
 

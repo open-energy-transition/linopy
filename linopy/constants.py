@@ -23,11 +23,11 @@ short_GREATER_EQUAL = ">"
 short_LESS_EQUAL = "<"
 
 
-SIGNS = {EQUAL, GREATER_EQUAL, LESS_EQUAL}
-SIGNS_alternative = {long_EQUAL, short_GREATER_EQUAL, short_LESS_EQUAL}
-SIGNS_pretty = {EQUAL: "=", GREATER_EQUAL: "≥", LESS_EQUAL: "≤"}
+SIGNS: set[str] = {EQUAL, GREATER_EQUAL, LESS_EQUAL}
+SIGNS_alternative: set[str] = {long_EQUAL, short_GREATER_EQUAL, short_LESS_EQUAL}
+SIGNS_pretty: dict[str, str] = {EQUAL: "=", GREATER_EQUAL: "≥", LESS_EQUAL: "≤"}
 
-sign_replace_dict = {
+sign_replace_dict: dict[str, str] = {
     long_EQUAL: EQUAL,
     short_GREATER_EQUAL: GREATER_EQUAL,
     short_LESS_EQUAL: LESS_EQUAL,
@@ -36,9 +36,16 @@ sign_replace_dict = {
 TERM_DIM = "_term"
 STACKED_TERM_DIM = "_stacked_term"
 GROUPED_TERM_DIM = "_grouped_term"
+GROUP_DIM = "_group"
 FACTOR_DIM = "_factor"
 CONCAT_DIM = "_concat"
-HELPER_DIMS = [TERM_DIM, STACKED_TERM_DIM, GROUPED_TERM_DIM, FACTOR_DIM, CONCAT_DIM]
+HELPER_DIMS: list[str] = [
+    TERM_DIM,
+    STACKED_TERM_DIM,
+    GROUPED_TERM_DIM,
+    FACTOR_DIM,
+    CONCAT_DIM,
+]
 
 
 class ModelStatus(Enum):
@@ -99,6 +106,7 @@ class TerminationCondition(Enum):
     iteration_limit = "iteration_limit"
     terminated_by_limit = "terminated_by_limit"
     suboptimal = "suboptimal"
+    imprecise = "imprecise"
 
     # WARNING
     unbounded = "unbounded"
@@ -127,13 +135,14 @@ class TerminationCondition(Enum):
             return cls("unknown")
 
 
-STATUS_TO_TERMINATION_CONDITION_MAP = {
+STATUS_TO_TERMINATION_CONDITION_MAP: dict[SolverStatus, list[TerminationCondition]] = {
     SolverStatus.ok: [
         TerminationCondition.optimal,
         TerminationCondition.iteration_limit,
         TerminationCondition.time_limit,
         TerminationCondition.terminated_by_limit,
         TerminationCondition.suboptimal,
+        TerminationCondition.imprecise,
     ],
     SolverStatus.warning: [
         TerminationCondition.unbounded,
@@ -162,7 +171,7 @@ class Status:
 
     status: SolverStatus
     termination_condition: TerminationCondition
-    legacy_status: Union[tuple[str, str], str] = ""
+    legacy_status: tuple[str, str] | str = ""
 
     @classmethod
     def process(cls, status: str, termination_condition: str) -> "Status":
@@ -207,8 +216,8 @@ class Result:
     """
 
     status: Status
-    solution: Union[Solution, None] = None
-    solver_model: Union[Any, None] = None
+    solution: Solution | None = None
+    solver_model: Any = None
 
     def __repr__(self) -> str:
         solver_model_string = (
@@ -238,4 +247,4 @@ class Result:
             else:
                 logger.info(" Optimization successful: \n%s\n", self)
         else:
-            logger.warning("Optimization failed: \n%s\n", self)
+            logger.warning("Optimization potentially failed: \n%s\n", self)

@@ -1,15 +1,15 @@
 ci:
-  autoupdate_schedule: monthly
+  autoupdate_schedule: quarterly
 
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v5.0.0
     hooks:
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
     -   id: check-merge-conflict
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.3
+    rev: v0.12.2
     hooks:
     -   id: ruff
         args: [--fix]
@@ -21,11 +21,11 @@ repos:
 #     -   id: docformatter
 #         args: [--in-place, --make-summary-multi-line, --pre-summary-newline]
 -   repo: https://github.com/keewis/blackdoc
-    rev: v0.3.9
+    rev: v0.4.1
     hooks:
     -   id: blackdoc
 -   repo: https://github.com/codespell-project/codespell
-    rev: v2.3.0
+    rev: v2.4.1
     hooks:
     -   id: codespell
         types_or: [python, rst, markdown]
