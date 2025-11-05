@@ -1222,7 +1222,9 @@ class Model:
                 problem_fn = Path(only_generate_problem_file)
 
                 if problem_fn.suffix == ".lp":
-                    self.to_file(problem_fn)
+                    self.to_file(fn=problem_fn)
+                elif problem_fn.suffix == ".mps":
+                    self.to_file(fn=problem_fn)
                 elif problem_fn.suffix == ".nc":
                     self.to_netcdf(problem_fn)
                 else:
