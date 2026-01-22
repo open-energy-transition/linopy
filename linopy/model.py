@@ -30,6 +30,7 @@ from linopy.expressions import (
 from linopy.io import to_block_files, to_file, to_gurobipy, to_highspy, to_netcdf
 from linopy.matrices import MatrixAccessor
 from linopy.objective import Objective
+from linopy.oetc import OetcHandler
 from linopy.solvers import available_solvers, quadratic_solvers
 from linopy.variables import ScalarVariable, Variable, Variables
 
@@ -995,20 +996,23 @@ class Model:
         linopy.Model
             Optimized model.
         """
-        if remote:
-            solved = remote.solve_on_remote(
-                self,
-                solver_name=solver_name,
-                io_api=io_api,
-                problem_fn=problem_fn,
-                solution_fn=solution_fn,
-                log_fn=log_fn,
-                basis_fn=basis_fn,
-                warmstart_fn=warmstart_fn,
-                keep_files=keep_files,
-                sanitize_zeros=sanitize_zeros,
-                **solver_options,
-            )
+        if remote is not None:
+            if isinstance(remote, OetcHandler):
+                solved = remote.solve_on_oetc(self)
+            else:
+                solved = remote.solve_on_remote(
+                    self,
+                    solver_name=solver_name,
+                    io_api=io_api,
+                    problem_fn=problem_fn,
+                    solution_fn=solution_fn,
+                    log_fn=log_fn,
+                    basis_fn=basis_fn,
+                    warmstart_fn=warmstart_fn,
+                    keep_files=keep_files,
+                    sanitize_zeros=sanitize_zeros,
+                    **solver_options,
+                )
 
             self.objective.value = solved.objective.value
             self.status = solved.status

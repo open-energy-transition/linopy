@@ -50,6 +50,8 @@ setup(
         "dask>=0.18.0",
         "tqdm",
         "deprecation",
+        "requests",
+        "google-cloud-storage",
     ],
     extras_require={
         "docs": [
