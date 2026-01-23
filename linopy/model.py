@@ -198,7 +198,10 @@ class Model:
 
     @status.setter
     def status(self, value):
-        self._status = ModelStatus[value].value
+        try:
+            self._status = ModelStatus[value].value
+        except KeyError:
+            self._status = ModelStatus["unknown"].value
 
     @property
     def termination_condition(self):
@@ -209,7 +212,7 @@ class Model:
 
     @termination_condition.setter
     def termination_condition(self, value):
-        self._termination_condition = TerminationCondition[value].value
+        self._termination_condition = TerminationCondition.process(value).value
 
     @property
     @deprecated("0.2.7", "Use `objective.value` instead.")
