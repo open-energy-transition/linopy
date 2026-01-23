@@ -1014,7 +1014,7 @@ class Model:
                     **solver_options,
                 )
 
-            self.objective.value = solved.objective.value
+            self.objective.set_value(solved.objective.value)
             self.status = solved.status
             self.termination_condition = solved.termination_condition
             for k, v in self.variables.items():
