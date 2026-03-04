@@ -1382,7 +1382,6 @@ class Cplex(Solver[None]):
 
         if log_fn is not None:
             log_f.close()
-
         def get_solver_solution() -> Solution:
             if basis_fn and is_lp:
                 try:
@@ -1396,14 +1395,16 @@ class Cplex(Solver[None]):
                 m.solution.get_values(), m.variables.get_names(), dtype=float
             )
 
-            if is_lp:
+            try:
                 dual = pd.Series(
                     m.solution.get_dual_values(),
                     m.linear_constraints.get_names(),
                     dtype=float,
                 )
-            else:
-                logger.warning("Dual values of MILP couldn't be parsed")
+            except Exception:
+                logger.warning(
+                    "Dual values not available (e.g. barrier solution without crossover)"
+                )
                 dual = pd.Series(dtype=float)
             return Solution(solution, dual, objective)
 
